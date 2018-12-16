@@ -1,0 +1,614 @@
+<!doctype html>
+<!--
+Copyright 2018 The Immersive Web Community Group
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+-->
+<html>
+  <head>
+    <meta charset='utf-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1, user-scalable=no'>
+    <meta name='mobile-web-app-capable' content='yes'>
+    <meta name='apple-mobile-web-app-capable' content='yes'>
+
+    <!-- Origin Trial Token, feature = WebXR Device API, origin = https://immersive-web.github.io, expires = 2018-08-28 -->
+    <meta http-equiv="origin-trial" data-feature="WebXR Device API" data-expires="2018-08-28" content="AvOB8go1ErHWzxh9mq6YZPuISFlyZrvS269NaVAMtrFFPiL+Y/ij9fsalDpSiNxwvZgi7iVvv/iu4XOcy07KzQcAAABzeyJvcmlnaW4iOiJodHRwczovL3d3dy5zcGVuY2VyY2FwcGllbGxvLmNvbTo0NDMiLCJmZWF0dXJlIjoiV2ViWFJEZXZpY2VNNjkiLCJleHBpcnkiOjE1NDgyMDE1OTksImlzU3ViZG9tYWluIjp0cnVlfQ==">
+
+    <title>sound step</title>
+
+    <link href='./css/common.css' rel='stylesheet'></link>
+
+    <!--The polyfill is not needed for browser that have native API support,
+        but is linked by these samples for wider compatibility.-->
+    <!--script src='https://cdn.jsdelivr.net/npm/webxr-polyfill@latest/build/webxr-polyfill.js'></script-->
+    <script src='./js/webxr-polyfill.js'></script>
+
+    <!-- three js -->
+    <script src="./js/three.js/three.js"></script>
+    <script src="./js/utils.js"></script>
+
+    <!--This script patches up around implementation differences in past browser versions
+        so that the samples can always be written against the most recent spec changes.
+        It won't be necessary after the API has been officially shipped for a bit.-->
+    <script src='./js/webxr-version-shim.js'></script>
+
+    <!-- positional audio -->
+    <script src="https://cdn.jsdelivr.net/npm/resonance-audio/build/resonance-audio.min.js"></script>
+
+    <script src='./js/cottontail/build/cottontail.js'></script>
+
+    <script src='./js/webxr-button.js'></script>
+  </head>
+  <body>
+    <header>
+      <details open>
+        <summary>sound step</summary>
+        <p>
+            Create an immersive AR audio listening exprience + navigate your music filesystem
+            <!-- <a class="back" href="./">Back</a> -->
+          <br/>
+          <hr/>
+          <input id="useReticle" type="checkbox" checked>
+          <label for="useReticle">Use reticle for placement</label>
+          <button id="htmlPlayButton">play audio</button>
+            <select id="selector">
+                <option value="0">Speaker 1</option>
+                <option value="1">Speaker 2</option>
+                <option value="2">Speaker 3</option>
+                <option value="4">Turntable</option>
+                <!-- <option value="4" selected>Turntable</option> -->
+            </select>
+          <!-- <button id="placeStereoButton">place stereo 1</button> -->
+        </p>
+      </details>
+    </header>
+    <script>
+
+      (function () {
+      'use strict';
+      // If requested, initialize the WebXR polyfill
+      if (QueryArgs.getBool('allowPolyfill', false)) {
+        var polyfill = new WebXRPolyfill();
+      }
+      // Apply the version shim after the polyfill is instantiated, to ensure
+      // that the polyfill also gets patched if necessary.
+      var versionShim = new WebXRVersionShim();
+      let useReticle = document.getElementById('useReticle');
+      // XR globals.
+      let xrButton = null;
+      let xrFrameOfRef = null;
+      let outputCanvas = document.createElement('canvas');
+      outputCanvas.setAttribute('id', 'output-canvas');
+      let ctx = outputCanvas.getContext('xrpresent');
+      // WebGL scene globals.
+      let gl = null;
+      let renderer = null;
+      let scene = new Scene();
+      console.log("scene");
+      console.log(scene);
+      scene.enableStats(false);
+
+      // global pose 
+      var poseGlobal = null;
+
+      // play button 
+      let playButton = null;
+      let playTexture = new UrlTexture('./assets/play-button.png');
+      let pauseTexture = new UrlTexture('./assets/pause-button.png');
+
+        // Audio scene globals
+        let audioContext = new AudioContext();
+        // audioContext.state == 'running';
+        let resonance = new ResonanceAudio(audioContext);
+        resonance.output.connect(audioContext.destination);
+        audioContext.suspend();
+        // const DEFAULT_HEIGHT = 1.5; // og 
+        const DEFAULT_HEIGHT = 0; 
+        const ANALYSER_FFT_SIZE = 1024;
+      
+      
+      // stereo / speaker 
+      let stereo = new Gltf2Node({url: './assets/stereo/stereo.gltf'});
+      stereo.visible = false;
+      scene.addNode(stereo);
+
+      let audioSources = [];
+
+      let arObject = new Node();
+      arObject.visible = false;
+      scene.addNode(arObject);
+      let flower = new Gltf2Node({url: './assets/sunflower/sunflower.gltf'});
+      arObject.addNode(flower);
+
+      let arObjectSpeaker = new Node();
+      arObjectSpeaker.visible = false;
+      scene.addNode(arObjectSpeaker);
+      let stereo2 = new Gltf2Node({url: './assets/stereo/stereo.gltf'});
+      arObjectSpeaker.addNode(stereo2);
+      
+      // Having a really simple drop shadow underneath an object helps ground
+      // it in the world without adding much complexity.
+      let shadow = new DropShadowNode();
+      vec3.set(shadow.scale, 0.15, 0.15, 0.15);
+      arObject.addNode(shadow);
+      const MAX_FLOWERS = 30;
+      let flowers = [];
+      // Ensure the background is transparent for AR.
+      scene.clear = false;
+      function initXR() {
+        xrButton = new XRDeviceButton({
+          onRequestSession: onRequestSession,
+          onEndSession: onEndSession,
+          textEnterXRTitle: "START AR",
+          textXRNotFoundTitle: "AR NOT FOUND",
+          textExitXRTitle: "EXIT  AR",
+        });
+        document.querySelector('header').appendChild(xrButton.domElement);
+        if (navigator.xr) {
+          navigator.xr.requestDevice().then( function(device) {
+            // immersive: true, // cannot set this, but can add site to homescreen to get rid of toolbar
+            device.supportsSession({ environmentIntegration: true, outputContext: ctx }).then( function() {
+              xrButton.setDevice(device);
+            });
+            
+            // Load multiple audio sources.
+            Promise.all([
+            createAudioSource({
+                url: './assets/sound/guitar.ogg',
+                position: [0, DEFAULT_HEIGHT, -1],
+                rotateX: 0,
+                rotateY: 0, // radians
+                rotateZ: 0
+            }),
+            createAudioSource({
+                url: './assets/sound/drums.ogg',
+                position: [-1, DEFAULT_HEIGHT, 0],
+                rotateX: 0,
+                rotateY: Math.PI * 0.5, // radians
+                rotateZ: 0
+            }),
+            createAudioSource({
+                url: './assets/sound/perc.ogg',
+                position: [1, DEFAULT_HEIGHT, 0],
+                rotateX: 0,
+                rotateY: Math.PI * -0.5, // radians
+                rotateZ: 0
+            }),
+            ]).then(function(sources) {
+                audioSources = sources;
+
+                // Once the audio is loaded, create a button that toggles the
+                // audio state when clicked.
+                playButton = new ButtonNode(playTexture, function() {
+                    if (audioContext.state == 'running') {
+                    pauseAudio();
+                    } else {
+                    playAudio();
+                    }
+                });
+                // playButton.translation = [0, 1.2, -0.65]; // og 
+                playButton.translation = [0, 0, -0.65]; // y=0 is center/starting point for AR 
+                // playButton.translation = [0, 0, 0];
+
+                scene.addNode(playButton);
+                console.log('added play button to scene');
+            });
+
+          });
+        }
+      }
+
+      const htmlPlayButton = document.querySelector('#htmlPlayButton');
+      htmlPlayButton.addEventListener('click', function() {
+          playAudio();
+      });
+
+    
+    // static version
+    //   const placeStereoButton = document.querySelector('#placeStereoButton');
+    //   placeStereoButton.addEventListener('click', function() {
+    //       audioSources[1].position = [0, 0, 0];
+    //   });
+
+
+        // // place dynamic 
+        // const placeStereoButton = document.querySelector('#placeStereoButton');
+        // // stereo placer button
+        // placeStereoButton.addEventListener('click', function() {
+        //     console.log(poseGlobal);
+
+        //     // let aBitInFrontOfMe = vec3.create();
+        //     // transformMat4
+
+        //     // 1 = current index
+        //     audioSources[1].position = [rayOrigin[0], rayOrigin[1], rayOrigin[2]]; // for some reason, setting the position array this way works but not the rayOrigin directly
+        //     console.log(rayOrigin);
+     
+        // });
+ 
+
+      window.addEventListener('blur', function() {
+        // As a general rule you should mute any sounds your page is playing
+        // whenever the page loses focus.
+        pauseAudio();
+      });
+
+      function createAudioSource(options) {
+        // Create a Resonance source and set its position in space.
+        let source = resonance.createSource();
+        let pos = options.position;
+        source.setPosition(pos[0], pos[1], pos[2]);
+
+        // Connect an analyser. This is only for visualization of the audio, and
+        // in most cases you won't want it.
+        let analyser = audioContext.createAnalyser();
+        analyser.fftSize = ANALYSER_FFT_SIZE;
+        analyser.lastRMSdB = 0;
+
+        return fetch(options.url)
+          .then((response) => response.arrayBuffer())
+          .then((buffer) => audioContext.decodeAudioData(buffer))
+          .then((decodedBuffer) => {
+            let bufferSource = createBufferSource(
+              source, decodedBuffer, analyser);
+
+            return {
+              buffer: decodedBuffer,
+              bufferSource: bufferSource,
+              source: source,
+              analyser: analyser,
+              position: pos,
+              rotateX: options.rotateX,
+              rotateY: options.rotateY,
+              rotateZ: options.rotateZ,
+              matrix: null,
+              node: null
+            };
+          });
+      }
+
+      function updateAudioNodes() {
+        if (!stereo)
+          return;
+
+        for (let source of audioSources) {
+          if (!source.node) {
+            source.node = stereo.clone();
+            source.node.visible = true;
+            source.node.selectable = true;
+            scene.addNode(source.node);
+          }
+
+          let node = source.node;
+          let matrix = node.matrix;
+        //   console.log(source);
+
+        //   console.log(frozenQuat);
+
+          // Move the node to the right location.
+          mat4.identity(matrix);
+        //   mat4.fromQuat(matrix, frozenQuat);
+          mat4.translate(matrix, matrix, source.position);
+          /* `mat4.translate(out, a, v)`
+          Translate a mat4 by the given vector
+            Parameters:
+            Name	Type	Description
+            out	mat4	the receiving matrix
+            a	mat4	the matrix to translate
+            v	vec3	vector to translate by
+          */
+
+
+
+        //   mat4.rotateX(matrix, matrix, source.rotateX);
+        //   mat4.rotateY(matrix, matrix, source.rotateY);
+        //   mat4.rotateZ(matrix, matrix, source.rotateZ);
+
+          // manual override matrix 
+        //   mat4.set(matrix, poseGlobal.poseModelMatrix);
+        //   matrix = mat4.clone(poseGlobal.poseModelMatrix);
+        
+        // mat4.copy(matrix, poseGlobal.poseModelMatrix);
+        
+
+
+
+          // Scale it based on loudness of the audio channel
+          let scale = getLoudnessScale(source.analyser);
+          mat4.scale(matrix, matrix, [scale, scale, scale]);
+          
+        }
+      }
+
+      function createBufferSource(source, buffer, analyser) {
+        // Create a buffer source. This will need to be recreated every time
+        // we wish to start the audio, see 
+        // https://developer.mozilla.org/en-US/docs/Web/API/AudioBufferSourceNode
+        let bufferSource = audioContext.createBufferSource();
+        bufferSource.loop = true;
+        bufferSource.connect(source.input);
+
+        bufferSource.connect(analyser);
+
+        bufferSource.buffer = buffer;
+
+        return bufferSource;
+      }
+
+      /**
+       * Returns a floating point value that represents the loudness of the audio
+       * stream, appropriate for scaling an object with.
+       * @return {Number} loudness scalar.
+       */
+       let fftBuffer = new Float32Array(ANALYSER_FFT_SIZE);
+      function getLoudnessScale(analyser) {
+        analyser.getFloatTimeDomainData(fftBuffer);
+        let sum = 0;
+        for (let i = 0; i < fftBuffer.length; ++i)
+          sum += fftBuffer[i] * fftBuffer[i];
+
+        // Calculate RMS and convert it to DB for perceptual loudness.
+        let rms = Math.sqrt(sum / fftBuffer.length);
+        let db = 30 + 10 / Math.LN10 * Math.log(rms <= 0 ? 0.0001 : rms);
+
+        // Moving average with the alpha of 0.525. Experimentally determined.
+        analyser.lastRMSdB += 0.525 * ((db < 0 ? 0 : db) - analyser.lastRMSdB);
+
+        // Scaling by 1/30 is also experimentally determined. Max is to present
+        // objects from disappearing entirely.
+        return Math.max(0.3, analyser.lastRMSdB / 30.0);
+      }
+
+
+      function playAudio() {
+          console.log('play audio called');
+        if (audioContext.state == 'running')
+          return;
+
+        audioContext.resume();
+
+        for (let source of audioSources) {
+          source.bufferSource.start(0);
+        }
+
+        if (playButton) {
+          playButton.iconTexture = pauseTexture;
+        }
+      }
+
+      function pauseAudio() {
+        if (audioContext.state == 'suspended')
+          return;
+
+        for (let source of audioSources) {
+          source.bufferSource.stop(0);
+          source.bufferSource = createBufferSource(
+            source.source, source.buffer, source.analyser);
+        }
+
+        audioContext.suspend();
+
+        if (playButton) {
+          playButton.iconTexture = playTexture;
+        }
+      }
+
+      function onRequestSession(device) {
+        device.requestSession({ environmentIntegration: true, outputContext: ctx })
+            .then( function(session) {
+              // Add the canvas to the document once we know that it will be
+              // rendered to.
+              document.body.appendChild(outputCanvas);
+              xrButton.setSession(session);
+              onSessionStarted(session);
+            });
+      }
+      function onSessionStarted(session) {
+          console.log('session started');
+        session.addEventListener('end', onSessionEnded);
+        // session.addEventListener('select', onSelect); // og 
+        session.addEventListener('select', placeSpeaker); // place a speaker on screen tap
+        if (!gl) {
+          gl = createWebGLContext({
+            compatibleXRDevice: session.device
+          });
+          renderer = new Renderer(gl);
+          scene.setRenderer(renderer);
+        }
+        session.baseLayer = new XRWebGLLayer(session, gl);
+        session.requestFrameOfReference('eye-level').then( function(frameOfRef) {
+          xrFrameOfRef = frameOfRef;
+          session.requestAnimationFrame(onXRFrame);
+        });
+
+      }
+      function onEndSession(session) {
+        session.end();
+        // Remove the injected output canvas from the DOM.
+        document.body.removeChild(document.querySelector('#output-canvas'));
+      }
+      function onSessionEnded(event) {
+        xrButton.setSession(null);
+      }
+      // Adds a new object to the scene at the
+      // specificed transform.
+      function addARObjectAt(matrix) {
+        let newFlower = arObject.clone();
+        newFlower.visible = true;
+        newFlower.matrix = matrix;
+        scene.addNode(newFlower);
+        flowers.push(newFlower);
+        // For performance reasons if we add too many objects start
+        // removing the oldest ones to keep the scene complexity
+        // from growing too much.
+        if (flowers.length > MAX_FLOWERS) {
+          let oldFlower = flowers.shift();
+          scene.removeNode(oldFlower);
+        }
+      }
+      function addARSpeakerObjectAt(matrix) {
+        let newSpeaker = arObjectSpeaker.clone();
+        newSpeaker.visible = true;
+        newSpeaker.matrix = matrix;
+        scene.addNode(newSpeaker);
+        // flowers.push(newSpeaker);
+        // For performance reasons if we add too many objects start
+        // removing the oldest ones to keep the scene complexity
+        // from growing too much.
+        
+      }
+      let currentQuat = quat.create();
+      let frozenQuat = quat.create();
+      let rayOrigin = vec3.create();
+      let rayDirection = vec3.create();
+      function onSelect(event) {
+        if (useReticle.checked && arObject.visible) {
+          // If we're using the reticle then we've already got a mesh positioned
+          // at the latest hit point and we should just use it's matrix to save
+          // an unnecessary requestHitTest call.
+          addARObjectAt(arObject.matrix);
+        } else {
+          // Otherwise we'll use the target ray from the input source that generated
+          // this event to fire off a new hit test.
+          let inputPose = event.frame.getInputPose(event.inputSource, xrFrameOfRef);
+          if (!inputPose) {
+            return;
+          }
+          if (inputPose.targetRay) {
+            vec3.set(rayOrigin,
+                inputPose.targetRay.origin.x,
+                inputPose.targetRay.origin.y,
+                inputPose.targetRay.origin.z);
+            vec3.set(rayDirection,
+                inputPose.targetRay.direction.x,
+                inputPose.targetRay.direction.y,
+                inputPose.targetRay.direction.z);
+            event.frame.session.requestHitTest(rayOrigin, rayDirection, xrFrameOfRef).then( function(results) {
+              if (results.length) {
+                addARObjectAt(results[0].hitMatrix);
+              }
+            });
+          }
+        }
+      }
+      function placeSpeaker(event) {
+            var selector = document.getElementById("selector").value; // which 3D object you wanna move
+
+            // console.log(rayOrigin);
+            // console.log(rayDirection);
+
+            // console.log(poseGlobal.poseModelMatrix);
+            // audioSources[selector].matrix = poseGlobal.poseModelMatrix; 
+
+            // addARObjectAt(poseGlobal.poseModelMatrix);
+            // addARSpeakerObjectAt(poseGlobal.poseModelMatrix);
+
+            let thisSource = audioSources[selector];
+            // console.log(thisSource);
+
+            // var hitMatrix = new THREE.Matrix4().fromArray(poseGlobal.poseModelMatrix);
+            // console.log(hitMatrix);
+            // thisSource.position.setFromMatrixPosition(hitMatrix);
+            // thisSource.node.matrix = hitMatrix.elements;
+
+
+            // thisSource.position.setFromMatrixPosition();
+            thisSource.position = [rayOrigin[0], rayOrigin[1], rayOrigin[2]]; // for some reason, setting the position array this way works but not the rayOrigin directly
+     
+            // quat.copy(frozenQuat, currentQuat);
+            // console.log(frozenQuat);
+
+            
+            let node = thisSource.node;
+            let matrix = node.matrix;
+
+            console.log(thisSource.position);
+
+            thisSource.node.lookAt(0.0, 0.0, 0.0);
+            // mat4.identity(matrix);
+            // mat4.translate(matrix, matrix, thisSource.position); 
+            // thisSource.rotateX 
+
+            // Move the node to the right location.
+            // mat4.identity(matrix);
+            // mat4.fromQuat(matrix, frozenQuat);
+            // mat4.translate(matrix, matrix, thisSource.position); 
+
+
+            console.log(thisSource);
+            
+
+            // audioSources[selector].rotateX = rayDirection[0];
+            // audioSources[selector].rotateY = rayDirection[2] * 2 * Math.PI;
+            // audioSources[selector].rotateZ = rayDirection[2];
+
+      }
+      // Called every time a XRSession requests that a new frame be drawn.
+      function onXRFrame(t, frame) {
+        let session = frame.session;
+        let pose = frame.getDevicePose(xrFrameOfRef);
+        poseGlobal = pose;
+        // If requested, use the pose to cast a reticle into the scene using a
+        // continuous hit test. For the moment we're just using the flower
+        // as the "reticle".
+        if (useReticle.checked && pose && pose.poseModelMatrix) {
+          vec3.set(rayOrigin, 0, 0, 0);
+          vec3.transformMat4(rayOrigin, rayOrigin, pose.poseModelMatrix);
+          vec3.set(rayDirection, 0, 0, -1);
+          vec3.transformMat4(rayDirection, rayDirection, pose.poseModelMatrix);
+          vec3.sub(rayDirection, rayDirection, rayOrigin);
+        //   console.log(rayDirection);
+          vec3.normalize(rayDirection, rayDirection);
+
+          mat4.getRotation(currentQuat, pose.poseModelMatrix);
+        //   console.log(currentQuat);
+
+          // do the hit plane placing of the turntable if its in turntable mode, not stereo[index]
+          session.requestHitTest(rayOrigin, rayDirection, xrFrameOfRef).then( function(results) {
+            // When the hit test returns use it to place our proxy object.
+            if (results.length) {
+              let hitResult = results[0];
+              arObject.visible = true;
+            //   console.log(hitResult);
+              arObject.matrix = hitResult.hitMatrix;
+            } else {
+              arObject.visible = false;
+            }
+          });
+        } else {
+          arObject.visible = false;
+        }
+
+        scene.startFrame();
+        session.requestAnimationFrame(onXRFrame);
+
+        // audio 
+        updateAudioNodes();
+
+        scene.drawXRFrame(frame, pose);
+
+        // audio 
+        if (pose) {
+          resonance.setListenerFromMatrix({ elements: pose.poseModelMatrix });
+        }
+
+        scene.endFrame();
+      }
+      // Start the XR application.
+      initXR();
+      })();
+    </script>
+  </body>
+</html>
